@@ -286,6 +286,36 @@ class SparkContext(config: SparkConf) extends Logging {
   private[spark] val addedArchives = new ConcurrentHashMap[String, Long]().asScala
   private[spark] val addedJars = new ConcurrentHashMap[String, Long]().asScala
 
+  private[spark] val allRdds = {
+    val map: ConcurrentMap[Int, RDD[_]] = new MapMaker().weakValues().makeMap[Int, RDD[_]]()
+    map.asScala
+  }
+
+  // if a RDD is larger than cacheSizeWarnLevel (stored in Bytes), and is reused only cacheSizeCountLevel time
+  private var cacheSizeWarn: Long = 0 
+
+  private var cacheSizeCount: Int = 1 // default is one, means that the RDD is never used again
+
+  private var recomputeCount: Int = 0 // default is one, if compute more than once, suggest cache it
+
+  private var logRecommendInfo: Boolean = false // default is zero, don't output recommendation
+
+  def setCacheSizeWarn(warn: String): Unit = {
+    cacheSizeWarn = Utils.byteStringAsBytes(warn)
+  }
+
+  def setCacheSizeCount(count: Int): Unit = {
+    cacheSizeCount = count
+  }
+
+  def setRecomputeCount(count: Int): Unit = {
+    recomputeCount = count
+  }
+
+  def setLogRecommendInfo(): Unit = {
+    logRecommendInfo = true
+  }
+
   // Keeps track of all persisted RDDs
   private[spark] val persistentRdds = {
     val map: ConcurrentMap[Int, RDD[_]] = new MapMaker().weakValues().makeMap[Int, RDD[_]]()
@@ -1843,6 +1873,66 @@ class SparkContext(config: SparkConf) extends Logging {
     }
   }
 
+  private[spark] def AllRDDStorageInfo(): Array[RDDInfo] = {
+    assertNotStopped()
+    val rddInfos = allRdds.values.map(RDDInfo.fromRdd).toArray
+    rddInfos.foreach { rddInfo =>
+      val rddId = rddInfo.id
+      val rddStorageInfo = statusStore.asOption(statusStore.rdd(rddId))
+      rddInfo.numCachedPartitions = rddStorageInfo.map(_.numCachedPartitions).getOrElse(0)
+      rddInfo.memSize = rddStorageInfo.map(_.memoryUsed).getOrElse(0L)
+      rddInfo.diskSize = rddStorageInfo.map(_.diskUsed).getOrElse(0L)
+      rddInfo.recompute = (rddInfo.recompute/rddInfo.numPartitions) - 1
+      if(rddInfo.numCachedPartitions != 0){
+        rddInfo.reuse = rddInfo.reuse/rddInfo.numCachedPartitions
+      }
+    }
+    rddInfos
+  }
+
+  def printCacheSizeWarnStorageInfo(): Unit = {
+    println("\n********************** Information About Large Unused Cached RDD **********************")
+    val rddInfos = AllRDDStorageInfo().filter(_.isCached).filter(_.memSize > cacheSizeWarn).filter(_.reuse < cacheSizeCount)
+    rddInfos.foreach { rddInfo =>
+      println(toInfoCacheSizeString(rddInfo))
+    }
+    println("***************************************************************************************\n")
+  }
+
+  def printComputeCountWarnInfo(): Unit = {
+    println("\n************************* Information About Used Uncached RDD *************************")
+    val rddInfos = AllRDDStorageInfo().filter(!_.isCached).filter(_.recompute > recomputeCount)
+    rddInfos.foreach { rddInfo =>
+      println(toInfoComputeCountString(rddInfo))
+    }
+    println("***************************************************************************************\n")
+  }
+
+// deals with the first case: RDD not cached, but is used greater than recomputeCountLevel number of times
+  private[spark] def toInfoComputeCountString(rddInfo: RDDInfo): String = {
+    ("RDD \"%s\" (id: %d), created in %s, is recomputed %d times").format(
+        rddInfo.name, rddInfo.id, rddInfo.callSite, rddInfo.recompute)
+  }
+  
+
+// deals with the second case: RDD larger than cacheSizeWarnLevel (stored in Bytes) reused only cacheSizeCountLevel time
+  private[spark] def toInfoCacheSizeString(rddInfo: RDDInfo): String = {
+    import Utils.bytesToString
+    ("RDD \"%s\" (id: %d), created in %s, with StorageLevel: %s, is reused %d times; " +
+      "MemorySize: %s; DiskSize: %s; ").format(
+        rddInfo.name, rddInfo.id, rddInfo.callSite, rddInfo.storageLevel.toString, rddInfo.reuse, bytesToString(rddInfo.memSize), bytesToString(rddInfo.diskSize))
+  }
+
+  def printAllRDDInfo(): Unit = {
+    println("\n********************************* All RDD Information *********************************")
+    val rddInfos = AllRDDStorageInfo()
+    rddInfos.foreach { rddInfo =>
+      println(rddInfo.id)
+      println(rddInfo.toString)
+      println(rddInfo.parentIds)
+    }
+    println("***************************************************************************************\n")
+  }
   /**
    * :: DeveloperApi ::
    * Return information about what RDDs are cached, if they are in mem or on disk, how much space
@@ -2060,6 +2150,12 @@ class SparkContext(config: SparkConf) extends Logging {
    * Shut down the SparkContext.
    */
   def stop(): Unit = {
+
+    printAllRDDInfo()
+    if (logRecommendInfo) {
+      printCacheSizeWarnStorageInfo()
+      printComputeCountWarnInfo()
+    }
     if (LiveListenerBus.withinListenerThread.value) {
       throw new SparkException(s"Cannot stop SparkContext within listener bus thread.")
     }
@@ -2541,6 +2637,11 @@ class SparkContext(config: SparkConf) extends Logging {
   /** Register a new RDD, returning its RDD ID */
   private[spark] def newRddId(): Int = nextRddId.getAndIncrement()
 
+  private[spark] def newRegRddId(rdd: RDD[_]): Int = {
+    val next_id = newRddId()
+    allRdds(next_id) = rdd
+    next_id
+  }
   /**
    * Registers listeners specified in spark.extraListeners, then starts the listener bus.
    * This should be called after all internal listeners have been registered with the listener bus

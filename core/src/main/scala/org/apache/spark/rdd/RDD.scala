@@ -145,7 +145,11 @@ abstract class RDD[T: ClassTag](
   def sparkContext: SparkContext = sc
 
   /** A unique ID for this RDD (within its SparkContext). */
-  val id: Int = sc.newRddId()
+  val id: Int = sc.newRegRddId(this)
+
+  val recompute = sc.longAccumulator
+
+  val total = sc.longAccumulator
 
   /** A friendly name for this RDD */
   @transient var name: String = _
@@ -323,6 +327,7 @@ abstract class RDD[T: ClassTag](
    * subclasses of RDD.
    */
   final def iterator(split: Partition, context: TaskContext): Iterator[T] = {
+    this.total.add(1)
     if (storageLevel != StorageLevel.NONE) {
       getOrCompute(split, context)
     } else {
@@ -362,6 +367,7 @@ abstract class RDD[T: ClassTag](
     if (isCheckpointedAndMaterialized) {
       firstParent[T].iterator(split, context)
     } else {
+      this.recompute.add(1)
       compute(split, context)
     }
   }
