@@ -1908,12 +1908,89 @@ class SparkContext(config: SparkConf) extends Logging {
     println("***************************************************************************************\n")
   }
 
+  def printComputeCountWarnInfoOptimal(): Unit = {
+    println("\n************************* OPTIMAL CACHING SUGGESTION *************************")
+    val rddInfos = AllRDDStorageInfo().filter(!_.isCached).filter(_.recompute > recomputeCount)
+    var idToRddInfoMap = scala.collection.mutable.Map[Int, RDDInfo]()
+    var rddIsParent = scala.collection.mutable.Map[Int, Int]()
+    var rddFinalRecomputeCount = scala.collection.mutable.Map[Int, Int]()
+    var rddFinalRecompute = scala.collection.mutable.ArrayBuffer[Int]()
+    rddInfos.foreach { rddInfo =>
+      idToRddInfoMap += (rddInfo.id -> rddInfo)
+      rddIsParent += (rddInfo.id -> 0)
+      rddFinalRecomputeCount += (rddInfo.id -> rddInfo.recompute)
+    }
+    rddInfos.foreach { rddInfo =>
+      rddInfo.parentIds.foreach { parentid =>
+        rddIsParent += (parentid -> (rddIsParent(parentid) + 1))
+      }
+    }
+    val q = scala.collection.mutable.Queue[Int]()
+    rddIsParent.foreach { case (id, v) => 
+      if (v == 0) {
+        q += id
+      }
+    }
+    logInfo("starting queue: " + q)
+
+    // need to cache array list
+    while (!q.isEmpty){
+      val cur = q.dequeue()
+      logInfo("processing id: " + cur.toString)
+      idToRddInfoMap(cur).parentIds.foreach { parentid =>
+        rddIsParent += (parentid -> (rddIsParent(parentid) - 1))
+        if (rddIsParent(parentid) == 0) {
+          q += parentid
+        }
+      }
+      if (rddFinalRecomputeCount(cur) == 0){
+        logInfo("id " + cur.toString + " don't need recomputing")
+      }
+      else if(rddFinalRecomputeCount(cur) < 0){
+        logError("error")
+      }
+      else{
+        logInfo("process outer queue: ")
+        logInfo("updated queue: " + q)
+        rddFinalRecompute += cur
+        logInfo("updated final compute array: " + rddFinalRecompute)
+        val curq = scala.collection.mutable.Queue[Int]()
+        curq += cur
+        while (!curq.isEmpty){
+          logInfo("current inner queue: " + curq)
+          logInfo("current rddFinalRecomputeCount: " + rddFinalRecomputeCount)
+          val process = curq.dequeue()
+
+          idToRddInfoMap(process).parentIds.foreach { parentid =>
+              rddFinalRecomputeCount += (parentid -> (rddFinalRecomputeCount(parentid) - rddFinalRecomputeCount(cur)))
+              curq += parentid
+          }
+        }
+        rddFinalRecomputeCount += (cur -> 0)
+      }
+    }
+
+    if (rddFinalRecompute.isEmpty){
+      println("Everything looks perfect")
+    }
+    else{
+      rddFinalRecompute.foreach { id =>
+        println(toInfoOptimalCachingtString(idToRddInfoMap(id)))
+      }
+    }
+    println("***************************************************************************************\n")
+  }
+
 // deals with the first case: RDD not cached, but is used greater than recomputeCountLevel number of times
   private[spark] def toInfoComputeCountString(rddInfo: RDDInfo): String = {
-    ("RDD \"%s\" (id: %d), created in %s, is recomputed %d times").format(
-        rddInfo.name, rddInfo.id, rddInfo.callSite, rddInfo.recompute)
+    ("RDD \"%s\" (id: %d), parents: %s, created in %s, is recomputed %d times").format(
+        rddInfo.name, rddInfo.id, rddInfo.parentIds, rddInfo.callSite, rddInfo.recompute)
   }
-  
+
+  private[spark] def toInfoOptimalCachingtString(rddInfo: RDDInfo): String = {
+    ("RDD \"%s\" (id: %d), created in %s").format(
+        rddInfo.name, rddInfo.id, rddInfo.callSite)
+  }
 
 // deals with the second case: RDD larger than cacheSizeWarnLevel (stored in Bytes) reused only cacheSizeCountLevel time
   private[spark] def toInfoCacheSizeString(rddInfo: RDDInfo): String = {
@@ -2151,10 +2228,10 @@ class SparkContext(config: SparkConf) extends Logging {
    */
   def stop(): Unit = {
 
-    printAllRDDInfo()
     if (logRecommendInfo) {
       printCacheSizeWarnStorageInfo()
       printComputeCountWarnInfo()
+      printComputeCountWarnInfoOptimal()
     }
     if (LiveListenerBus.withinListenerThread.value) {
       throw new SparkException(s"Cannot stop SparkContext within listener bus thread.")

@@ -34,8 +34,8 @@ class RDDInfo(
     val callSite: String = "",
     val scope: Option[RDDOperationScope] = None,
     val outputDeterministicLevel: DeterministicLevel.Value = DeterministicLevel.DETERMINATE,
-    var recompute: Long = 0,
-    var reuse: Long = 0)
+    var recompute: Int = 0,
+    var reuse: Int = 0)
   extends Ordered[RDDInfo] {
 
   var numCachedPartitions = 0
@@ -64,8 +64,8 @@ private[spark] object RDDInfo {
     val callsiteLongForm = Option(SparkEnv.get)
       .map(_.conf.get(EVENT_LOG_CALLSITE_LONG_FORM))
       .getOrElse(false)
-    val recompute = rdd.recompute.value
-    val reuse = rdd.total.value - recompute
+    val recompute = rdd.recompute.value.toInt
+    val reuse = rdd.total.value.toInt - recompute
 
     val callSite = if (callsiteLongForm) {
       rdd.creationSite.longForm
