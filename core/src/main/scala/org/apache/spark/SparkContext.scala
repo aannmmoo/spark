@@ -2230,7 +2230,6 @@ class SparkContext(config: SparkConf) extends Logging {
 
     if (logRecommendInfo) {
       printCacheSizeWarnStorageInfo()
-      printComputeCountWarnInfo()
       printComputeCountWarnInfoOptimal()
     }
     if (LiveListenerBus.withinListenerThread.value) {
